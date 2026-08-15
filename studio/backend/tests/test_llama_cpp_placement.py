@@ -2017,3 +2017,62 @@ def test_a_paravirtual_metal_launch_prices_the_whole_model(tmp_path, monkeypatch
 
     assert backend._launch_host_shortfall_message(argv, [], {}) is None
     assert backend._launch_host_shortfall_message(argv, [], {}, child_has_no_gpu = True) is not None
+
+
+# ── Tensor parallelism keeps the requested KV cache type ─────────────
+
+
+def _tensor_backend(tmp_path):
+    backend, gguf = _backend(
+        tmp_path,
+        vulkan = False,
+        memory = [(0, 24_000, 24_000), (1, 24_000, 24_000)],
+    )
+    backend._tensor_split_aborts = lambda *args, **kwargs: False
+    return backend, gguf
+
+
+@pytest.mark.parametrize("kv_type", ["q8_0", "q4_0"])
+def test_tensor_mode_emits_the_requested_quantized_kv(tmp_path, kv_type):
+    """llama.cpp runs a quantized KV cache under --split-mode tensor (ggml-org/
+    llama.cpp#23792), so the requested type reaches the child verbatim. Two types,
+    so a q8_0-only carve-out cannot pass."""
+    backend, gguf = _tensor_backend(tmp_path)
+
+    cmd = _launch(backend, gguf, tensor_parallel = True, cache_type_kv = kv_type)["cmd"]
+
+    assert cmd[cmd.index("--split-mode") + 1] == "tensor"
+    assert cmd[cmd.index("--cache-type-k") + 1] == kv_type
+    assert cmd[cmd.index("--cache-type-v") + 1] == kv_type
+    # The recorded type /status reports and the reload matcher compares against.
+    assert backend.cache_type_kv == kv_type
+
+
+def test_an_unknown_kv_type_is_still_refused_in_tensor_mode(tmp_path):
+    """_valid_cache_types drops a type llama.cpp's kv_cache_type_from_str does not
+    know, emitting no flag rather than aborting the child. Tensor mode does not
+    widen it."""
+    backend, gguf = _tensor_backend(tmp_path)
+
+    cmd = _launch(backend, gguf, tensor_parallel = True, cache_type_kv = "q3_K")["cmd"]
+
+    assert cmd[cmd.index("--split-mode") + 1] == "tensor"
+    assert "--cache-type-k" not in cmd
+    assert "--cache-type-v" not in cmd
+    assert backend.cache_type_kv is None
+
+
+def test_tensor_mode_keeps_an_inherited_quantized_kv_env(tmp_path, monkeypatch):
+    """The tensor-branch env scrub owns the split, not the cache type: an
+    LLAMA_ARG_CACHE_TYPE_K/_V reaches the child untouched, while the tensor split
+    Unsloth emits itself is still cleared."""
+    monkeypatch.setenv("LLAMA_ARG_CACHE_TYPE_K", "q8_0")
+    monkeypatch.setenv("LLAMA_ARG_CACHE_TYPE_V", "q8_0")
+    monkeypatch.setenv("LLAMA_ARG_TENSOR_SPLIT", "9,1")
+    backend, gguf = _tensor_backend(tmp_path)
+
+    env = _launch(backend, gguf, tensor_parallel = True)["env"]
+
+    assert env["LLAMA_ARG_CACHE_TYPE_K"] == "q8_0"
+    assert env["LLAMA_ARG_CACHE_TYPE_V"] == "q8_0"
+    assert "LLAMA_ARG_TENSOR_SPLIT" not in env
