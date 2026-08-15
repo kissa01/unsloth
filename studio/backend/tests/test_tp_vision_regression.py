@@ -134,8 +134,7 @@ _ALLOWED_TP_DROP_GUARDS = {
     # Capacity: pooled usable VRAM can't hold weights + MTP reserve -> layer split.
     "_tp_weight_budget_mib <= _tp_required_mib",
     # Manual mode, Auto layers: --fit owns memory and is incompatible with a
-    # tensor split, so TP is dropped (surfaced via logger.info) before the
-    # cache-drop, so a quantized KV survives into the --fit load (#6414).
+    # tensor split, so TP is dropped (surfaced via logger.info) (#6414).
     "tensor_parallel and gpu_memory_mode == 'manual' and (gpu_layers < 0)",
     # Manual mode, explicit layers: a tensor split still needs >= 2 GPUs in use.
     "tensor_parallel and gpu_memory_mode == 'manual' and (gpu_layers >= 0) and (self._effective_gpu_count(sorted(gpu_ids) if gpu_ids else None) < 2)",
@@ -164,6 +163,14 @@ def test_tensor_parallel_drop_sites_match_allowlist():
         "review it, keep multi-GPU where possible, surface it, then update "
         "_ALLOWED_TP_DROP_GUARDS."
     )
+
+
+def test_every_tp_drop_strips_an_extras_split_mode():
+    """The three tensor->layer downgrades and the two manual-mode branches each
+    strip an extras --split-mode tensor, which would otherwise re-engage the mode
+    just dropped."""
+    load = "".join(inspect.getsource(LlamaCppBackend.load_model).split())
+    assert load.count("extra_args=strip_split_mode_only(extra_args)") == 5
 
 
 def test_every_tp_drop_is_logged_not_silent():
