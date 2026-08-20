@@ -1361,14 +1361,10 @@ def test_a_single_gpu_tensor_request_is_probed_as_the_layer_load_it_is(tmp_path)
     ],
 )
 def test_a_dropped_tensor_request_never_emits_an_extras_split_mode(
-    tmp_path, monkeypatch, n_gpus, model_gb, aborts, load_kwargs
+    tmp_path, n_gpus, model_gb, aborts, load_kwargs
 ):
-    """Extras are appended last, so a user --split-mode tensor left in them would
-    re-engage the mode the downgrade just dropped. Every drop strips it, in the
-    downgrade itself or in the manual branch it falls into."""
-    # The abort cache is class-level, so the recorded-abort case would otherwise
-    # decide the downgrade a later case is meant to reach.
-    monkeypatch.setattr(LlamaCppBackend, "_tensor_split_abort_keys", set())
+    """Extras are appended last, so a user split-mode group left in them would
+    re-engage the mode the downgrade just dropped."""
     backend, gguf = _backend(
         tmp_path,
         vulkan = False,
@@ -1383,11 +1379,15 @@ def test_a_dropped_tensor_request_never_emits_an_extras_split_mode(
         backend,
         gguf,
         tensor_parallel = True,
-        extra_args = ["--split-mode", "tensor"],
+        # --tensor-split is coupled to the mode and stripped with it, so a strip
+        # narrowed to --split-mode alone would leave a stale user ratio behind.
+        extra_args = ["--split-mode", "tensor", "--tensor-split", "3,1", "--top-k", "5"],
         **load_kwargs,
     )["cmd"]
 
     assert "--split-mode" not in cmd
+    assert "--tensor-split" not in cmd
+    assert "--top-k" in cmd  # the rest of extras still lands, so the strip is targeted
 
 
 def test_the_probe_prices_the_drafter_at_a_context_the_weakest_card_can_hold(tmp_path):
