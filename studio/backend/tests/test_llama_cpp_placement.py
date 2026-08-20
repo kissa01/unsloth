@@ -1347,6 +1347,49 @@ def test_a_single_gpu_tensor_request_is_probed_as_the_layer_load_it_is(tmp_path)
     assert backend.spec_fallback_reason == "drafter_no_vram"
 
 
+@pytest.mark.parametrize(
+    "n_gpus, model_gb, aborts, load_kwargs",
+    [
+        # The three tensor -> layer downgrades, which strip in the downgrade itself.
+        (2, 1, True, {}),  # a recorded --split-mode tensor abort
+        (1, 1, False, {}),  # fewer than 2 GPUs clear the compute-buffer reserve
+        (2, 80, False, {}),  # pooled VRAM cannot hold the weights
+        # Manual mode drops TP earlier, so the strip lands in the manual branch below it.
+        (2, 1, False, {"gpu_memory_mode": "manual"}),  # Auto layers: --fit owns memory
+        (1, 1, False, {"gpu_memory_mode": "manual", "gpu_layers": 20}),  # 1 GPU in use
+        (2, 1, False, {"gpu_memory_mode": "manual", "gpu_layers": 0}),  # nothing to split
+    ],
+)
+def test_a_dropped_tensor_request_never_emits_an_extras_split_mode(
+    tmp_path, monkeypatch, n_gpus, model_gb, aborts, load_kwargs
+):
+    """Extras are appended last, so a user --split-mode tensor left in them would
+    re-engage the mode the downgrade just dropped. Every drop strips it, in the
+    downgrade itself or in the manual branch it falls into."""
+    # The abort cache is class-level, so the recorded-abort case would otherwise
+    # decide the downgrade a later case is meant to reach.
+    monkeypatch.setattr(LlamaCppBackend, "_tensor_split_abort_keys", set())
+    backend, gguf = _backend(
+        tmp_path,
+        vulkan = False,
+        memory = [(i, 24_000, 24_000) for i in range(n_gpus)],
+    )
+    backend._tensor_split_aborts = lambda *args, **kwargs: aborts
+    # A real weight size, not _backend's KB stub: the pooled-VRAM downgrade only
+    # engages against one.
+    backend._get_gguf_size_bytes = lambda _path: model_gb * 1024**3
+
+    cmd = _launch(
+        backend,
+        gguf,
+        tensor_parallel = True,
+        extra_args = ["--split-mode", "tensor"],
+        **load_kwargs,
+    )["cmd"]
+
+    assert "--split-mode" not in cmd
+
+
 def test_the_probe_prices_the_drafter_at_a_context_the_weakest_card_can_hold(tmp_path):
     """The compute buffer is replicated on every device of a layer split, so a
     pooled budget can price a context the smallest card cannot hold; the placement
