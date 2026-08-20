@@ -1350,20 +1350,24 @@ def test_a_single_gpu_tensor_request_is_probed_as_the_layer_load_it_is(tmp_path)
 @pytest.mark.parametrize(
     "n_gpus, model_gb, aborts, load_kwargs",
     [
-        # The three tensor -> layer downgrades, which strip in the downgrade itself.
+        # One row per strip site in load_model. Placement is the whole point, so
+        # the rows are the sites, not the drop reasons -- two manual-mode drops
+        # share a strip and would be one row's worth of coverage twice.
         (2, 1, True, {}),  # a recorded --split-mode tensor abort
         (1, 1, False, {}),  # fewer than 2 GPUs clear the compute-buffer reserve
         (2, 80, False, {}),  # pooled VRAM cannot hold the weights
-        # Manual mode drops TP earlier, so the strip lands in the manual branch below it.
         (2, 1, False, {"gpu_memory_mode": "manual"}),  # Auto layers: --fit owns memory
-        (1, 1, False, {"gpu_memory_mode": "manual", "gpu_layers": 20}),  # 1 GPU in use
-        (2, 1, False, {"gpu_memory_mode": "manual", "gpu_layers": 0}),  # nothing to split
+        # gpu_ids, not n_gpus: this guard counts the selection (or torch's visible
+        # devices), so without a pin it passes only because torch is absent here.
+        (2, 1, False, {"gpu_memory_mode": "manual", "gpu_layers": 20, "gpu_ids": [0]}),
     ],
 )
-def test_a_dropped_tensor_request_never_emits_an_extras_split_mode(
+def test_a_dropped_tensor_request_launches_as_a_layer_split(
     tmp_path, n_gpus, model_gb, aborts, load_kwargs
 ):
-    """Extras are appended last, so a user split-mode group left in them would
+    """A downgrade has to land a working layer split, not merely lose a flag: the
+    server comes up in layer mode and the user's unrelated extras still reach it.
+    Extras are appended last, so a --split-mode tensor left among them would
     re-engage the mode the downgrade just dropped."""
     backend, gguf = _backend(
         tmp_path,
@@ -1371,23 +1375,25 @@ def test_a_dropped_tensor_request_never_emits_an_extras_split_mode(
         memory = [(i, 24_000, 24_000) for i in range(n_gpus)],
     )
     backend._tensor_split_aborts = lambda *args, **kwargs: aborts
-    # A real weight size, not _backend's KB stub: the pooled-VRAM downgrade only
-    # engages against one.
+    # _backend stubs the weights at 1 KB; only a real size trips the pooled-VRAM case.
     backend._get_gguf_size_bytes = lambda _path: model_gb * 1024**3
 
     cmd = _launch(
         backend,
         gguf,
         tensor_parallel = True,
-        # --tensor-split is coupled to the mode and stripped with it, so a strip
-        # narrowed to --split-mode alone would leave a stale user ratio behind.
         extra_args = ["--split-mode", "tensor", "--tensor-split", "3,1", "--top-k", "5"],
         **load_kwargs,
     )["cmd"]
 
+    # The load is the layer split the downgrade chose ...
+    assert backend.tensor_parallel is False
+    # ... it still carries the user's unrelated extras ...
+    assert "--top-k" in cmd
+    # ... and not the split-mode group -- --tensor-split rides with the mode, so a
+    # strip narrowed to --split-mode alone leaves the user's ratio behind.
     assert "--split-mode" not in cmd
     assert "--tensor-split" not in cmd
-    assert "--top-k" in cmd  # the rest of extras still lands, so the strip is targeted
 
 
 def test_the_probe_prices_the_drafter_at_a_context_the_weakest_card_can_hold(tmp_path):
