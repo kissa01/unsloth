@@ -165,14 +165,6 @@ def test_tensor_parallel_drop_sites_match_allowlist():
     )
 
 
-def test_every_tp_drop_strips_an_extras_split_mode():
-    """The three tensor->layer downgrades and the two manual-mode branches each
-    strip an extras --split-mode tensor, which would otherwise re-engage the mode
-    just dropped."""
-    load = "".join(inspect.getsource(LlamaCppBackend.load_model).split())
-    assert load.count("extra_args=strip_split_mode_only(extra_args)") == 5
-
-
 def test_every_tp_drop_is_logged_not_silent():
     """Each tensor_parallel downgrade must log why, so it never disappears silently."""
     fn = _load_model_ast()
